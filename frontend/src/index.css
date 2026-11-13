@@ -28,3 +28,9 @@ h1, h2, h3 { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+@page { size: A4; margin: 16mm; }
+@media print {
+  body { min-width: 0; background: #fff; }
+  * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
