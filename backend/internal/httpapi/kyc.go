@@ -20,6 +20,7 @@ const maxKYCSize int64 = 100 << 20
 
 type beginKYCRequest struct {
 	Title       string `json:"title"`
+	KYCType     string `json:"kycType"`
 	FileName    string `json:"fileName"`
 	ContentType string `json:"contentType"`
 	FileSize    int64  `json:"fileSize"`
@@ -80,8 +81,8 @@ func (a *API) beginKYCUpload(c *echo.Context) error {
 	req.Title = strings.TrimSpace(req.Title)
 	req.FileName = filepath.Base(strings.TrimSpace(req.FileName))
 	req.ContentType = strings.TrimSpace(req.ContentType)
-	if req.Title == "" || len(req.Title) > 120 || req.FileName == "." || req.FileSize < 1 || req.FileSize > maxKYCSize {
-		return echo.NewHTTPError(400, "title, filename, and a file up to 100 MiB are required")
+	if req.Title == "" || len(req.Title) > 120 || (req.KYCType != "aadhaar" && req.KYCType != "pan" && req.KYCType != "voter_id") || req.FileName == "." || req.FileSize < 1 || req.FileSize > maxKYCSize {
+		return echo.NewHTTPError(400, "title, KYC document type, filename, and a file up to 100 MiB are required")
 	}
 	if !strings.HasPrefix(req.ContentType, "image/") && req.ContentType != "application/pdf" {
 		return echo.NewHTTPError(400, "only image and PDF documents are supported")
@@ -100,7 +101,7 @@ func (a *API) beginKYCUpload(c *echo.Context) error {
 		return err
 	}
 	claims, _ := a.requestClaims(c)
-	_, err = a.service.DB.ExecContext(c.Request().Context(), `INSERT INTO kyc_upload_sessions(slug,member_id,upload_id,object_key,title,file_name,content_type,file_size,part_size,initiated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, slug, memberID, aws.ToString(out.UploadId), key, req.Title, req.FileName, req.ContentType, req.FileSize, kycChunkSize, claims.Subject)
+	_, err = a.service.DB.ExecContext(c.Request().Context(), `INSERT INTO kyc_upload_sessions(slug,member_id,upload_id,object_key,title,kyc_type,file_name,content_type,file_size,part_size,initiated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, slug, memberID, aws.ToString(out.UploadId), key, req.Title, req.KYCType, req.FileName, req.ContentType, req.FileSize, kycChunkSize, claims.Subject)
 	if err != nil {
 		_, _ = client.AbortMultipartUpload(c.Request().Context(), &s3.AbortMultipartUploadInput{Bucket: aws.String(a.config.S3Bucket), Key: aws.String(key), UploadId: out.UploadId})
 		return err
@@ -143,10 +144,10 @@ func (a *API) completeKYCUpload(c *echo.Context) error {
 	if err := c.Bind(&req); err != nil || len(req.Parts) == 0 {
 		return echo.NewHTTPError(400, "upload parts are required")
 	}
-	var key, uploadID, title, fileName, contentType string
+	var key, uploadID, title, kycType, fileName, contentType string
 	var size int64
 	var uploader *string
-	err := a.service.DB.QueryRowContext(c.Request().Context(), `SELECT object_key,upload_id,title,file_name,content_type,file_size,initiated_by::text FROM kyc_upload_sessions WHERE slug=$1 AND member_id=$2`, slug, memberID).Scan(&key, &uploadID, &title, &fileName, &contentType, &size, &uploader)
+	err := a.service.DB.QueryRowContext(c.Request().Context(), `SELECT object_key,upload_id,title,kyc_type,file_name,content_type,file_size,initiated_by::text FROM kyc_upload_sessions WHERE slug=$1 AND member_id=$2`, slug, memberID).Scan(&key, &uploadID, &title, &kycType, &fileName, &contentType, &size, &uploader)
 	if err != nil {
 		return serviceError(err)
 	}
@@ -174,16 +175,16 @@ func (a *API) completeKYCUpload(c *echo.Context) error {
 		return echo.NewHTTPError(400, "uploaded file size does not match the declared size")
 	}
 	var docID string
-	err = a.service.DB.QueryRowContext(c.Request().Context(), `INSERT INTO kyc_documents(slug,member_id,title,file_name,content_type,file_size,object_key,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid) RETURNING id::text`, slug, memberID, title, fileName, contentType, size, key, aws.ToString(uploader)).Scan(&docID)
+	err = a.service.DB.QueryRowContext(c.Request().Context(), `INSERT INTO kyc_documents(slug,member_id,title,kyc_type,file_name,content_type,file_size,object_key,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid) RETURNING id::text`, slug, memberID, title, kycType, fileName, contentType, size, key, aws.ToString(uploader)).Scan(&docID)
 	if err != nil {
 		return err
 	}
-	_, err = a.service.DB.ExecContext(c.Request().Context(), `INSERT INTO audit_entries(actor_user_id,action,entity_type,entity_id,request_id,after_state) VALUES(NULLIF($1,'')::uuid,'kyc_document_uploaded','kyc_documents',$2,$3,jsonb_build_object('memberId',$4,'title',$5,'slug',$6,'fileName',$7,'contentType',$8,'fileSize',$9,'objectKey',$10))`, aws.ToString(uploader), docID, c.Request().Header.Get("X-Request-ID"), memberID, title, slug, fileName, contentType, size, key)
+	_, err = a.service.DB.ExecContext(c.Request().Context(), `INSERT INTO audit_entries(actor_user_id,action,entity_type,entity_id,request_id,after_state) VALUES(NULLIF($1,'')::uuid,'kyc_document_uploaded','kyc_documents',$2,$3,jsonb_build_object('memberId',$4,'title',$5,'kycType',$6,'slug',$7,'fileName',$8,'contentType',$9,'fileSize',$10,'objectKey',$11))`, aws.ToString(uploader), docID, c.Request().Header.Get("X-Request-ID"), memberID, title, kycType, slug, fileName, contentType, size, key)
 	if err != nil {
 		return err
 	}
 	_, _ = a.service.DB.ExecContext(c.Request().Context(), `DELETE FROM kyc_upload_sessions WHERE slug=$1`, slug)
-	return c.JSON(http.StatusCreated, map[string]any{"id": docID, "slug": slug, "title": title, "fileName": fileName, "contentType": contentType, "fileSize": size})
+	return c.JSON(http.StatusCreated, map[string]any{"id": docID, "slug": slug, "title": title, "kycType": kycType, "fileName": fileName, "contentType": contentType, "fileSize": size})
 }
 
 func (a *API) listKYCDocuments(c *echo.Context) error {
@@ -191,7 +192,7 @@ func (a *API) listKYCDocuments(c *echo.Context) error {
 	if err := a.authorizeMember(c, memberID); err != nil {
 		return err
 	}
-	rows, err := a.service.DB.QueryContext(c.Request().Context(), `SELECT id::text,slug,title,file_name,content_type,file_size,uploaded_by::text,created_at FROM kyc_documents WHERE member_id=$1 ORDER BY created_at DESC`, memberID)
+	rows, err := a.service.DB.QueryContext(c.Request().Context(), `SELECT id::text,slug,title,kyc_type,file_name,content_type,file_size,uploaded_by::text,created_at FROM kyc_documents WHERE member_id=$1 ORDER BY created_at DESC`, memberID)
 	if err != nil {
 		return err
 	}
@@ -200,6 +201,7 @@ func (a *API) listKYCDocuments(c *echo.Context) error {
 		ID          string  `json:"id"`
 		Slug        string  `json:"slug"`
 		Title       string  `json:"title"`
+		KYCType     *string `json:"kycType"`
 		FileName    string  `json:"fileName"`
 		ContentType string  `json:"contentType"`
 		FileSize    int64   `json:"fileSize"`
@@ -209,7 +211,7 @@ func (a *API) listKYCDocuments(c *echo.Context) error {
 	items := []item{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.ID, &v.Slug, &v.Title, &v.FileName, &v.ContentType, &v.FileSize, &v.UploadedBy, &v.CreatedAt); err != nil {
+		if err = rows.Scan(&v.ID, &v.Slug, &v.Title, &v.KYCType, &v.FileName, &v.ContentType, &v.FileSize, &v.UploadedBy, &v.CreatedAt); err != nil {
 			return err
 		}
 		items = append(items, v)
