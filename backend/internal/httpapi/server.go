@@ -104,12 +104,15 @@ func New(cfg config.Config, logger *slog.Logger, service *application.Service, t
 	staff.GET("/payments/mine", a.paymentsMine, a.requirePermissionOrRole("payments.read", "promoter"))
 	staff.GET("/enrollments/mine", a.enrollmentsMine, a.requirePermissionOrRole("enrollments.read", "promoter"))
 	staff.GET("/members/mine", a.myMembers, a.requirePermissionOrRole("members.read", "promoter"))
+	staff.POST("/members/mine", a.createMyCustomer, a.requirePermissionOrRole("members.create", "promoter"))
+	staff.POST("/promoter/enrollments", a.createEnrollment, a.requirePermissionOrRole("enrollments.create", "promoter"))
 	staff.GET("/promoter/incentives/mine", a.myIncentives, a.requirePermissionOrRole("incentives.read", "promoter"))
 	member := e.Group("/api/v1", a.authenticate("member"))
-	member.GET("/member/me", a.myMember)
-	member.GET("/member/payments", a.myPayments)
-	member.GET("/member/payments/:id/receipt", a.receipt)
-	member.GET("/member/enrollments", a.enrollmentsMine)
+	member.GET("/member/me", a.myMember, a.requirePermission("dashboard.read"))
+	member.GET("/member/payments", a.myPayments, a.requirePermission("payments.read"))
+	member.GET("/member/payments/:id/receipt", a.receipt, a.requirePermission("payments.read"))
+	member.GET("/member/enrollments", a.enrollmentsMine, a.requirePermission("enrollments.read"))
+	member.PUT("/member/enrollments/:id/frequency", a.setMyPaymentFrequency, a.requirePermission("enrollments.frequency.update"))
 
 	e.HTTPErrorHandler = func(c *echo.Context, err error) {
 		var he *echo.HTTPError
@@ -394,15 +397,37 @@ func (a *API) createEnrollment(c *echo.Context) error {
 		MemberID   string `json:"memberId"`
 		SchemeID   string `json:"schemeId"`
 		StartMonth string `json:"startMonth"`
+		EndsOn     string `json:"endsOn"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid enrollment")
 	}
-	out, err := a.service.CreateEnrollment(c.Request().Context(), a.actor(c), req.MemberID, req.SchemeID, req.StartMonth)
+	out, err := a.service.CreateEnrollment(c.Request().Context(), a.actor(c), req.MemberID, req.SchemeID, req.StartMonth, req.EndsOn)
 	if err != nil {
 		return serviceError(err)
 	}
 	return c.JSONBlob(http.StatusCreated, out)
+}
+func (a *API) createMyCustomer(c *echo.Context) error {
+	var req struct {
+		Name string `json:"name"`
+		Phone string `json:"phone"`
+		Email string `json:"email"`
+		Address string `json:"address"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := c.Bind(&req); err != nil { return echo.NewHTTPError(http.StatusBadRequest, "invalid customer") }
+	out, err := a.service.CreateMyCustomer(c.Request().Context(), a.actor(c), req.Name, req.Phone, req.Email, req.Address, req.Username, req.Password)
+	if err != nil { return serviceError(err) }
+	return c.JSONBlob(http.StatusCreated, out)
+}
+func (a *API) setMyPaymentFrequency(c *echo.Context) error {
+	var req struct { Frequency string `json:"frequency"` }
+	if err := c.Bind(&req); err != nil { return echo.NewHTTPError(http.StatusBadRequest, "invalid payment frequency") }
+	out, err := a.service.SetMyPaymentFrequency(c.Request().Context(), a.actor(c), c.Param("id"), req.Frequency)
+	if err != nil { return serviceError(err) }
+	return c.JSONBlob(http.StatusOK, out)
 }
 func (a *API) updateEnrollmentStatus(c *echo.Context) error {
 	var req struct {

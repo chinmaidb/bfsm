@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"schemeapp/backend/internal/security"
 )
 
 func camelJSON(raw []byte) []byte {
@@ -525,7 +527,7 @@ func (s *Service) RecordPayment(ctx context.Context, actor Actor, v PaymentInput
 	}
 	defer tx.Rollback()
 	var result []byte
-	err = tx.QueryRowContext(ctx, `INSERT INTO payments(member_id,enrollment_id,amount_minor,currency,payment_method,reference,idempotency_key,received_by) SELECT $1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid WHERE EXISTS (SELECT 1 FROM enrollments WHERE id=$2 AND member_id=$1 AND status='active') AND EXISTS (SELECT 1 FROM members WHERE id=$1 AND active) AND ($9='admin' OR EXISTS (SELECT 1 FROM members m JOIN promoters p ON p.id=m.promoter_id WHERE m.id=$1 AND p.user_id=NULLIF($8,'')::uuid AND p.active)) ON CONFLICT (idempotency_key) DO NOTHING RETURNING to_jsonb(payments)`, v.MemberID, v.EnrollmentID, v.AmountMinor, v.Currency, v.PaymentMethod, v.Reference, v.IdempotencyKey, actor.UserID, actor.Role).Scan(&result)
+	err = tx.QueryRowContext(ctx, `INSERT INTO payments(member_id,enrollment_id,amount_minor,currency,payment_method,reference,idempotency_key,received_by) SELECT $1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid WHERE EXISTS (SELECT 1 FROM enrollments WHERE id=$2 AND member_id=$1 AND status='active' AND ends_on>=CURRENT_DATE) AND EXISTS (SELECT 1 FROM members WHERE id=$1 AND active) AND ($9='admin' OR EXISTS (SELECT 1 FROM members m JOIN promoters p ON p.id=m.promoter_id WHERE m.id=$1 AND p.user_id=NULLIF($8,'')::uuid AND p.active)) ON CONFLICT (idempotency_key) DO NOTHING RETURNING to_jsonb(payments)`, v.MemberID, v.EnrollmentID, v.AmountMinor, v.Currency, v.PaymentMethod, v.Reference, v.IdempotencyKey, actor.UserID, actor.Role).Scan(&result)
 	if errors.Is(err, sql.ErrNoRows) {
 		var existing []byte
 		var memberID, enrollmentID, currency, method, reference string
@@ -559,10 +561,14 @@ func (s *Service) RecordPayment(ctx context.Context, actor Actor, v PaymentInput
 	return camelJSON(result), nil
 }
 
-func (s *Service) CreateEnrollment(ctx context.Context, actor Actor, memberID, schemeID, startMonth string) (json.RawMessage, error) {
+func (s *Service) CreateEnrollment(ctx context.Context, actor Actor, memberID, schemeID, startMonth, endsOn string) (json.RawMessage, error) {
 	month, err := time.Parse("2006-01", startMonth)
 	if err != nil {
 		return nil, invalid("startMonth must use YYYY-MM")
+	}
+	end, err := time.Parse("2006-01-02", endsOn)
+	if err != nil || end.Before(month) {
+		return nil, invalid("endsOn must be a date on or after the start month")
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -570,7 +576,7 @@ func (s *Service) CreateEnrollment(ctx context.Context, actor Actor, memberID, s
 	}
 	defer tx.Rollback()
 	var result []byte
-	err = tx.QueryRowContext(ctx, `INSERT INTO enrollments(member_id,scheme_id,start_month) SELECT m.id,s.id,$3 FROM members m JOIN schemes s ON TRUE WHERE m.id=$1 AND s.id=$2 AND m.active AND s.active RETURNING to_jsonb(enrollments)`, memberID, schemeID, month).Scan(&result)
+	err = tx.QueryRowContext(ctx, `INSERT INTO enrollments(member_id,scheme_id,start_month,ends_on) SELECT m.id,s.id,$3,$4 FROM members m JOIN schemes s ON TRUE WHERE m.id=$1 AND s.id=$2 AND m.active AND s.active AND ($5 <> 'promoter' OR EXISTS (SELECT 1 FROM promoters p WHERE p.id=m.promoter_id AND p.user_id=NULLIF($6,'')::uuid)) RETURNING to_jsonb(enrollments)`, memberID, schemeID, month, end, actor.Role, actor.UserID).Scan(&result)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, invalid("active member and scheme are required")
@@ -592,6 +598,73 @@ func (s *Service) CreateEnrollment(ctx context.Context, actor Actor, memberID, s
 		return nil, err
 	}
 	return camelJSON(result), nil
+}
+
+func (s *Service) SetMyPaymentFrequency(ctx context.Context, actor Actor, enrollmentID, frequency string) (json.RawMessage, error) {
+	if frequency != "weekly" && frequency != "biweekly" && frequency != "monthly" && frequency != "quarterly" {
+		return nil, invalid("frequency must be weekly, biweekly, monthly, or quarterly")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var before, after []byte
+	if err = tx.QueryRowContext(ctx, `SELECT to_jsonb(e) FROM enrollments e JOIN members m ON m.id=e.member_id WHERE e.id=$1 AND m.user_id=$2 FOR UPDATE OF e`, enrollmentID, actor.UserID).Scan(&before); err != nil {
+		return nil, err
+	}
+	if err = tx.QueryRowContext(ctx, `UPDATE enrollments SET payment_frequency=$2 WHERE id=$1 RETURNING to_jsonb(enrollments)`, enrollmentID, frequency).Scan(&after); err != nil {
+		return nil, err
+	}
+	if err = writeAudit(ctx, tx, actor, "enrollment_payment_frequency_changed", "enrollments", enrollmentID, before, after); err != nil {
+		return nil, err
+	}
+	if err = writeEvent(ctx, tx, "scheme.enrollment_payment_frequency_changed.v1", "enrollments", enrollmentID, after); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return camelJSON(after), nil
+}
+
+func (s *Service) CreateMyCustomer(ctx context.Context, actor Actor, name, phone, email, address, username, password string) (json.RawMessage, error) {
+	name, phone, username = strings.TrimSpace(name), strings.TrimSpace(phone), strings.TrimSpace(username)
+	if len(name) < 2 || len(name) > 120 || len(phone) < 5 || len(phone) > 32 || len(username) < 3 || len(username) > 80 {
+		return nil, invalid("name, phone, and a 3-80 character username are required")
+	}
+	hash, err := security.HashPassword(password)
+	if err != nil {
+		return nil, invalid("initial password must be at least 12 characters")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var userID, memberID string
+	err = tx.QueryRowContext(ctx, `INSERT INTO app_users(username,password_hash,role,company_role_id) SELECT $1,$2,'member',id FROM company_roles WHERE role_key='customer' RETURNING id::text`, username, hash).Scan(&userID)
+	if err != nil {
+		return nil, err
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO members(user_id,promoter_id,name,phone,email,address) SELECT $1,p.id,$3,$4,NULLIF($5,''),$6 FROM promoters p WHERE p.user_id=$2 AND p.active RETURNING id::text`, userID, actor.UserID, name, phone, strings.TrimSpace(email), address).Scan(&memberID)
+	if err != nil {
+		return nil, err
+	}
+	var after []byte
+	if err = tx.QueryRowContext(ctx, `SELECT to_jsonb(m)-'user_id' FROM members m WHERE m.id=$1`, memberID).Scan(&after); err != nil {
+		return nil, err
+	}
+	if err = writeAudit(ctx, tx, actor, "promoter_customer_created", "members", memberID, nil, after); err != nil {
+		return nil, err
+	}
+	if err = writeEvent(ctx, tx, "portal.customer_created.v1", "members", memberID, after); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return camelJSON(after), nil
 }
 
 func (s *Service) UpdateEnrollmentStatus(ctx context.Context, actor Actor, id, status string) (json.RawMessage, error) {
@@ -742,7 +815,21 @@ func (s *Service) PaymentsFor(ctx context.Context, role, userID string) ([]json.
 }
 
 func (s *Service) EnrollmentsFor(ctx context.Context, role, userID string) ([]json.RawMessage, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT to_jsonb(r) FROM (SELECT e.id,e.member_id,e.scheme_id,e.start_month,e.status,m.member_number,m.name AS member_name,pr.name AS promoter_name,s.name AS scheme_name,s.contribution_minor,s.currency,s.duration_months FROM enrollments e JOIN members m ON m.id=e.member_id JOIN promoters pr ON pr.id=m.promoter_id JOIN schemes s ON s.id=e.scheme_id WHERE ($1 IN ('admin','staff') OR ($1='promoter' AND pr.user_id=$2) OR ($1='member' AND m.user_id=$2)) ORDER BY e.start_month DESC LIMIT 200) r`, role, userID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT to_jsonb(r) FROM (
+		SELECT e.id,e.member_id,e.scheme_id,e.start_month,e.ends_on,e.payment_frequency,e.status,
+		m.member_number,m.name AS member_name,pr.name AS promoter_name,s.name AS scheme_name,
+		s.contribution_minor,s.currency,s.duration_months,
+		COALESCE((SELECT CASE e.payment_frequency
+			WHEN 'daily' THEN max(p.paid_at)::date + 1
+			WHEN 'weekly' THEN max(p.paid_at)::date + 7
+			WHEN 'biweekly' THEN max(p.paid_at)::date + 14
+			WHEN 'quarterly' THEN (max(p.paid_at)::date + interval '3 months')::date
+			ELSE (max(p.paid_at)::date + interval '1 month')::date END
+			FROM payments p WHERE p.enrollment_id=e.id), e.start_month) AS next_due_on,
+		(SELECT count(*) FROM payments p WHERE p.enrollment_id=e.id) AS payments_collected
+		FROM enrollments e JOIN members m ON m.id=e.member_id JOIN promoters pr ON pr.id=m.promoter_id JOIN schemes s ON s.id=e.scheme_id
+		WHERE ($1 IN ('admin','staff') OR ($1='promoter' AND pr.user_id=$2) OR ($1='member' AND m.user_id=$2))
+		ORDER BY e.start_month DESC LIMIT 200) r`, role, userID)
 	if err != nil {
 		return nil, err
 	}

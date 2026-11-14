@@ -18,6 +18,7 @@ var permissionCatalog = map[string]string{
 	"members.read": "View members", "members.create": "Create members", "members.update": "Edit members", "members.delete": "Deactivate members",
 	"schemes.read": "View schemes", "schemes.create": "Create schemes", "schemes.update": "Edit schemes", "schemes.delete": "Deactivate schemes",
 	"enrollments.read": "View enrollments", "enrollments.create": "Create enrollments", "enrollments.update": "Change enrollment status",
+	"enrollments.frequency.update": "Set own payment frequency",
 	"payments.read": "View payments and receipts", "payments.create": "Record payments",
 	"draws.read": "View draw results", "draws.create": "Record chosen members",
 	"incentives.read": "View incentives", "incentives.create": "Create incentives", "incentives.update": "Update incentive status",

@@ -1,6 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type SubmitEvent } from 'react'
 import {
-  Activity, ArrowDownToLine, BriefcaseBusiness, Building2, ChartNoAxesCombined,
+  ArrowDownToLine, BriefcaseBusiness, Building2, ChartNoAxesCombined,
   CircleDollarSign, ClipboardList, FileClock, Gift, LayoutDashboard, LogOut, Menu, ShieldCheck,
   Sparkles, TicketCheck, Users, WalletCards, Store, Receipt, HandCoins, UserCog, KeyRound,
 } from 'lucide-react'
@@ -9,8 +9,8 @@ import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { AccessControlPage } from './access-control'
 import {
-  AuditPage, Dashboard, DataTable, DrawPage, EnrollmentPage, IncentivePage, MemberProfilePage,
-  PageHeading, PartyPage, PaymentPage, FinancialLedgerPage, ReceiptPage, ReportsPage, ResourcePage, type Row,
+  AuditPage, Dashboard, DrawPage, EnrollmentPage, IncentivePage, MemberProfilePage, PromoterCustomersPage,
+  PartyPage, PaymentPage, FinancialLedgerPage, ReceiptPage, ReportsPage, ResourcePage,
 } from './screens'
 
 type Page = 'overview' | 'members' | 'promoters' | 'schemes' | 'enrollments' | 'payments' | 'draws' | 'incentives' | 'reports' | 'audit' | 'profile' | 'customers' | 'suppliers' | 'customerReceipts' | 'supplierPayments' | 'accounts' | 'roles'
@@ -26,10 +26,10 @@ const nav: Record<Session['role'], { id: Page; label: string; section: string }[
   admin: adminNav,
   staff: adminNav,
   promoter: [
-    { id: 'overview', label: 'Overview', section: 'Workspace' }, { id: 'members', label: 'My members', section: 'Workspace' }, { id: 'enrollments', label: 'Enrollments', section: 'Operations' }, { id: 'payments', label: 'Payments & receipts', section: 'Operations' }, { id: 'incentives', label: 'My incentives', section: 'Earnings' },
+    { id: 'overview', label: 'Overview', section: 'Workspace' }, { id: 'members', label: 'My customers', section: 'Workspace' }, { id: 'enrollments', label: 'Scheme assignments', section: 'Operations' }, { id: 'payments', label: 'Collections & receipts', section: 'Operations' }, { id: 'incentives', label: 'My incentives', section: 'Earnings' },
   ],
   member: [
-    { id: 'overview', label: 'Overview', section: 'My scheme' }, { id: 'profile', label: 'My profile', section: 'My scheme' }, { id: 'enrollments', label: 'My enrollments', section: 'My scheme' }, { id: 'payments', label: 'Payments & receipts', section: 'My scheme' },
+    { id: 'overview', label: 'Overview', section: 'My scheme' }, { id: 'profile', label: 'My profile', section: 'My scheme' }, { id: 'enrollments', label: 'My assigned schemes', section: 'My scheme' }, { id: 'payments', label: 'My payments & receipts', section: 'My scheme' },
   ],
 }
 const pagePermissions: Partial<Record<Page, string[]>> = {
@@ -37,7 +37,7 @@ const pagePermissions: Partial<Record<Page, string[]>> = {
   enrollments: ['enrollments.read'], payments: ['payments.read'], draws: ['draws.read', 'schemes.read', 'members.read'], incentives: ['incentives.read'],
   customers: ['parties.read'], suppliers: ['parties.read'], customerReceipts: ['cash_receipts.read', 'parties.read'],
   supplierPayments: ['supplier_payments.read', 'parties.read'], reports: ['reports.read'], audit: ['audit.read'],
-  accounts: ['accounts.read'], roles: ['roles.read'],
+  accounts: ['accounts.read'], roles: ['roles.read'], profile: ['dashboard.read'],
 }
 
 export function App() {
@@ -68,9 +68,7 @@ export function App() {
   if (!session) return <Login onLogin={onLogin} />
   if (window.location.pathname === '/receipt') return <ReceiptPage role={session.role}/>
   const baseItems = nav[session.role]
-  const items = session.role === 'admin' || session.role === 'staff'
-    ? baseItems.filter(item => session.isSuperAdmin || (pagePermissions[item.id] || []).every(permission => session.permissions?.includes(permission)))
-    : baseItems
+  const items = baseItems.filter(item => session.isSuperAdmin || (pagePermissions[item.id] || []).every(permission => session.permissions?.includes(permission)))
   const current = items.find(item => item.id === page) || items[0] || { id: 'overview' as Page, label: 'No access', section: '' }
   const Icon = icons[current.id]
   const set = (next: Page) => { setPage(next);setMenuOpen(false) }
@@ -116,17 +114,8 @@ function PageContent({ page, role }: { page: Page; role: Session['role'] }) {
 }
 
 function MyMembers() {
-  const { data, error, loading, refresh } = useLoadRows('/members/mine')
-  return <div className="page-enter"><PageHeading eyebrow="Your network" title="My members" description="Members assigned to your promoter account." action={<Button variant="outline" onClick={()=>void refresh()}><Activity size={15}/>Refresh</Button>}/><div className="mb-5 grid gap-4 sm:grid-cols-3"><Mini label="Assigned members" value={String(data?.length ?? '—')}/><Mini label="KYC complete" value={String(data?.filter(row=>Boolean(row.kycVerifiedAt)).length ?? '—')}/><Mini label="Active members" value={String(data?.filter(row=>row.active).length ?? '—')}/></div><div className="overflow-hidden rounded-2xl border border-slate-200 bg-white"><div className="border-b border-slate-100 px-5 py-4"><p className="text-sm font-bold">Member roster</p><p className="mt-1 text-xs text-slate-400">Only assigned records are visible to this account.</p></div>{error&&<div className="px-5 py-3 text-sm text-rose-600">{error}</div>}{loading?<div className="py-12 text-center text-sm text-slate-400">Loading member roster…</div>:<DataTable rows={data||[]} columns={['memberNumber','name','phone','kycType','kycVerifiedAt','active']} empty="No members are assigned yet"/>}</div></div>
+  return <PromoterCustomersPage/>
 }
-function useLoadRows(path:string){
-  const [data,setData]=useState<Row[]|null>(null);const [error,setError]=useState('');const [loading,setLoading]=useState(true)
-  const refresh=async()=>{setLoading(true);setError('');try{setData(await api<Row[]>(path))}catch(err){setError(err instanceof Error?err.message:'Could not load records')}finally{setLoading(false)}}
-  useEffect(()=>{void refresh()},[path])
-  return {data,error,loading,refresh}
-}
-function Mini({label,value}:{label:string;value:string}){return <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4"><p className="text-xs font-semibold text-slate-500">{label}</p><p className="mt-2 font-display text-xl font-extrabold text-slate-900">{value}</p></div>}
-
 function Brand() { return <div className="flex h-18 items-center gap-3 border-b border-white/10 px-6"><div className="flex size-9 items-center justify-center rounded-xl bg-linear-to-br from-indigo-400 to-violet-600 text-white shadow-lg shadow-indigo-950/40"><CircleDollarSign size={20}/></div><div><p className="font-display text-[15px] font-extrabold tracking-tight text-white">Ledgerly</p><p className="text-[9px] font-bold uppercase tracking-[.2em] text-indigo-300">Benefit scheme</p></div></div> }
 function Nav({items,active,onSelect}:{items:{id:Page;label:string;section:string}[];active:Page;onSelect:(page:Page)=>void}) {
   const sections=[...new Set(items.map(item=>item.section))]
@@ -137,7 +126,7 @@ function Avatar({name,dark=false}:{name:string;dark?:boolean}) { const initials=
 
 function Login({onLogin}:{onLogin:(username:string,password:string)=>Promise<void>}) {
   const [username,setUsername]=useState('');const [password,setPassword]=useState('');const [error,setError]=useState('');const [busy,setBusy]=useState(false)
-  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();setError('');setBusy(true);try{await onLogin(username,password)}catch(err){setError(err instanceof Error?err.message:'Could not sign in')}finally{setBusy(false)}}
+  async function submit(event:SubmitEvent<HTMLFormElement>){event.preventDefault();setError('');setBusy(true);try{await onLogin(username,password)}catch(err){setError(err instanceof Error?err.message:'Could not sign in')}finally{setBusy(false)}}
   return <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#f7f8fb] px-4 py-10"><div className="absolute -left-40 -top-48 size-130 rounded-full bg-indigo-200/45 blur-[100px]"/><div className="absolute -bottom-48 -right-32 size-120 rounded-full bg-violet-200/40 blur-[110px]"/><div className="relative grid w-full max-w-5xl overflow-hidden rounded-[30px] border border-white/80 bg-white shadow-[0_32px_100px_rgba(35,42,74,.12)] lg:grid-cols-[1.08fr_.92fr]">
     <section className="relative hidden min-h-155 flex-col justify-between overflow-hidden bg-[#11182b] p-10 text-white lg:flex"><div className="absolute -right-28 -top-10 size-96 rounded-full border border-white/5"/><div className="absolute -right-4 top-28 size-72 rounded-full border border-white/5"/><Brand/><div className="relative z-10 max-w-md"><BadgeUI/><h1 className="mt-6 font-display text-4xl font-extrabold leading-[1.12] tracking-tight">Every contribution.<br/><span className="text-indigo-300">Clearly accounted for.</span></h1><p className="mt-5 max-w-sm text-sm leading-7 text-slate-400">One considered workspace for member records, monthly payments, draw outcomes, and promoter earnings.</p><div className="mt-10 space-y-4">{[['01','A clear member ledger'],['02','Receipts that are easy to trace'],['03','Every important change recorded']].map(([n,label])=><div className="flex items-center gap-3" key={n}><span className="font-mono text-[10px] text-indigo-300">{n}</span><span className="h-px w-6 bg-slate-700"/><span className="text-xs font-medium text-slate-300">{label}</span></div>)}</div></div><p className="relative z-10 text-[10px] font-semibold tracking-wide text-slate-500">LEDGERLY · BENEFIT SCHEME MANAGEMENT</p></section>
     <section className="flex min-h-150 flex-col justify-center p-6 sm:p-10 lg:p-12"><div className="mb-10 lg:hidden"><div className="mb-5 flex size-10 items-center justify-center rounded-xl bg-indigo-600 text-white"><CircleDollarSign size={21}/></div><p className="font-display text-lg font-extrabold">Ledgerly</p><p className="mt-1 text-xs text-slate-500">Benefit scheme management</p></div><p className="text-[10px] font-extrabold uppercase tracking-[.2em] text-indigo-600">Welcome back</p><h2 className="mt-2 font-display text-3xl font-extrabold tracking-tight text-slate-950">Sign in to Ledgerly</h2><p className="mt-2 text-sm leading-6 text-slate-500">Use the username and password provided by your administrator.</p>

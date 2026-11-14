@@ -198,6 +198,12 @@ deactivations to retain history and foreign key references. The configured
 super admin bypasses permission checks and is managed only through production
 configuration.
 
+The company role catalog includes the `company_admin`, `promoter`, and
+`customer` role keys. Promoter and customer are seeded as role templates without
+operational permissions so they can be used to distinguish future role-specific
+screens and links. The catalog is shared by this application deployment; it is
+not currently scoped to separate company records.
+
 Master list endpoints accept `limit` (1–200, default 100) and `offset`. Master
 deletes are soft deactivations. Financial payment and draw result rows cannot be
 edited or deleted; corrections should be represented by a separately audited
