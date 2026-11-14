@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import { ArrowDownToLine, Check, CircleAlert, LoaderCircle, Plus, RefreshCw, Search, X } from 'lucide-react'
+import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { ArrowDownToLine, Check, CircleAlert, FileText, LoaderCircle, Plus, RefreshCw, Search, Upload, X } from 'lucide-react'
 import { api, hasPermission } from './lib/api'
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -70,18 +70,53 @@ export function DataTable({ rows, empty = 'No records yet', columns, actions }: 
   </table>{rows.length === 0 && <div className="px-5 py-14 text-center text-sm text-slate-400">{empty}</div>}</div>
 }
 
+function KycFilePicker({ name, accept }: { name: string; accept: string }) {
+  const inputId=useId();const [file,setFile]=useState<File|null>(null)
+  const size=file?file.size<1024*1024?`${(file.size/1024).toFixed(0)} KB`:`${(file.size/1048576).toFixed(2)} MB`:''
+  return <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-3 transition-colors hover:border-indigo-300 hover:bg-indigo-50/30 focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-50">
+    <input id={inputId} name={name} type="file" accept={accept} className="sr-only" onChange={event=>setFile(event.currentTarget.files?.[0]||null)}/>
+    <div className="flex cursor-pointer items-center gap-3 rounded-lg p-2 outline-none">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-indigo-600 shadow-sm"><Upload size={17}/></span>
+      <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-800">{file?'Replace selected document':'Choose a document'}</span><span className="mt-0.5 block text-xs text-slate-500">PDF or image · up to 100 MB</span></span>
+      <span className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm">Browse</span>
+    </div>
+    {file&&<div className="mt-2 flex items-center gap-2 border-t border-slate-200/80 px-2 pt-3"><FileText size={15} className="shrink-0 text-slate-400"/><span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{file.name}</span><span className="shrink-0 text-[11px] text-slate-400">{size}</span></div>}
+  </div>
+}
+
 function ModalForm({ title, fields, initial, onClose, onSubmit, busy }: { title: string; fields: Field[]; initial?: Row; onClose: () => void; onSubmit: (data: Row) => Promise<void>; busy: boolean }) {
   const [error, setError] = useState('')
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('')
     const form = new FormData(event.currentTarget); const value: Row = {}
-    fields.forEach(field => { const raw = String(form.get(field.name) || ''); value[field.name] = field.type === 'number' ? Number(raw) : raw })
+    fields.forEach(field => { const raw = form.get(field.name); value[field.name] = field.type === 'file' ? raw : field.type === 'number' ? Number(raw || 0) : String(raw || '') })
     try { await onSubmit(value) } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the record') }
   }
   return <Modal ariaLabel={title} onClose={onClose} className="sm:max-w-xl">
     <div className="flex shrink-0 items-start justify-between border-b border-slate-100 px-6 py-5"><div><p className="text-[10px] font-bold uppercase tracking-[.16em] text-indigo-600">Record details</p><h2 className="mt-1 font-display text-xl font-bold text-slate-950">{title}</h2></div><Button variant="ghost" size="icon" aria-label="Close form" onClick={onClose}><X size={18} /></Button></div>
-    <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5"><Notice error={error} />{fields.map(field => <label className="block" key={field.name}><span className="mb-1.5 block text-xs font-semibold text-slate-700">{field.label}{field.required && <span className="text-rose-500"> *</span>}</span>{field.options ? <Select name={field.name} required={field.required} defaultValue={String(initial?.[field.name] || '')}><option value="">Choose {field.label.toLowerCase()}</option>{field.options.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}</Select> : <Input name={field.name} required={field.required} type={field.type || 'text'} min={field.type === 'number' ? 0 : undefined} step={field.name.toLowerCase().includes('amount') || field.name.toLowerCase().includes('contribution') ? 1 : undefined} defaultValue={String(initial?.[field.name] ?? '')} placeholder={field.hint || field.label} />}</label>)}</div><div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 bg-white px-6 py-4"><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button disabled={busy}>{busy ? 'Saving…' : 'Save record'}</Button></div></form>
+    <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5"><Notice error={error} />{fields.map(field => <label className="block" key={field.name}><span className="mb-1.5 block text-xs font-semibold text-slate-700">{field.label}{field.required && <span className="text-rose-500"> *</span>}</span>{field.options ? <Select name={field.name} required={field.required} defaultValue={String(initial?.[field.name] || '')}><option value="">Choose {field.label.toLowerCase()}</option>{field.options.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}</Select> : field.type==='file' ? <KycFilePicker name={field.name} accept="image/*,application/pdf" /> : <Input name={field.name} required={field.required} type={field.type || 'text'} min={field.type === 'number' ? 0 : undefined} step={field.name.toLowerCase().includes('amount') || field.name.toLowerCase().includes('contribution') ? 1 : undefined} defaultValue={String(initial?.[field.name] ?? '')} placeholder={field.hint || field.label} />}</label>)}</div><div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 bg-white px-6 py-4"><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button disabled={busy}>{busy ? 'Saving…' : 'Save record'}</Button></div></form>
   </Modal>
+}
+
+async function uploadKYCDocument(memberId:string,file:File,title:string){
+  const started=await api<{slug:string;partSize:number;partCount:number}>(`/members/${memberId}/kyc-uploads`,{method:'POST',body:JSON.stringify({title:title||'KYC document',fileName:file.name,contentType:file.type||'application/octet-stream',fileSize:file.size})})
+  const parts:{partNumber:number;etag:string}[]=[]
+  for(let partNumber=1;partNumber<=started.partCount;partNumber++){
+    const {url}=await api<{url:string}>(`/members/${memberId}/kyc-uploads/${started.slug}/parts/url?partNumber=${partNumber}`,{method:'POST'})
+    const chunk=file.slice((partNumber-1)*started.partSize,Math.min(partNumber*started.partSize,file.size))
+    const uploaded=await fetch(url,{method:'PUT',body:chunk})
+    if(!uploaded.ok)throw new Error(`Could not upload KYC file part ${partNumber}`)
+    const etag=uploaded.headers.get('ETag');if(!etag)throw new Error('S3 must expose the ETag response header in its CORS settings')
+    parts.push({partNumber,etag})
+  }
+  await api(`/members/${memberId}/kyc-uploads/${started.slug}/complete`,{method:'POST',body:JSON.stringify({parts})})
+}
+
+function KycDocumentsModal({member,onClose}:{member:Row;onClose:()=>void}){
+  const memberId=String(member.id);const {data,loading,error,refresh}=useLoad<Row[]>(`/members/${memberId}/kyc-documents`);const [busy,setBusy]=useState(false);const [message,setMessage]=useState('')
+  async function download(slug:string){try{const result=await api<{url:string}>(`/members/${memberId}/kyc-documents/${slug}/download`);window.open(result.url,'_blank','noopener,noreferrer')}catch(err){setMessage(err instanceof Error?err.message:'Could not download document')}}
+  async function upload(event:FormEvent<HTMLFormElement>){event.preventDefault();const element=event.currentTarget;const form=new FormData(element);const file=form.get('file');if(!(file instanceof File)||!file.size)return;setBusy(true);setMessage('');try{await uploadKYCDocument(memberId,file,String(form.get('title')||''));element.reset();await refresh()}catch(err){setMessage(err instanceof Error?err.message:'Could not upload document')}finally{setBusy(false)}}
+  return <Modal ariaLabel="KYC documents" onClose={onClose} className="sm:max-w-2xl"><div className="flex items-center justify-between border-b border-slate-100 px-6 py-5"><div><p className="text-[10px] font-bold uppercase tracking-[.16em] text-indigo-600">Member KYC</p><h2 className="mt-1 text-xl font-bold">{String(member.name)} documents</h2></div><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X size={18}/></Button></div><div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6"><Notice error={error||message}/><form onSubmit={upload} className="grid gap-3 rounded-xl border border-slate-200 p-4 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-600">Document title<Input name="title" required maxLength={120} className="mt-1.5" placeholder="Identity proof"/></label><label className="text-xs font-semibold text-slate-600">PDF or image<Input name="file" type="file" accept="application/pdf,image/*" required className="mt-1.5"/></label><div className="sm:col-span-2"><Button disabled={busy}>{busy?'Uploading…':'Upload KYC document'}</Button><p className="mt-2 text-[11px] text-slate-400">Files upload in 8 MiB parts; maximum file size is 100 MiB.</p></div></form><div><h3 className="mb-3 text-sm font-bold">Uploaded documents</h3>{loading?<Loading/>:!data?.length?<p className="text-sm text-slate-400">No KYC files uploaded.</p>:<div className="divide-y divide-slate-100">{data.map(doc=><div key={String(doc.id)} className="flex items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate text-sm font-semibold">{String(doc.title)}</p><p className="mt-1 text-xs text-slate-400">{String(doc.fileName)} · {(Number(doc.fileSize)/1048576).toFixed(2)} MiB · {dateText(doc.createdAt)}</p></div><Button variant="outline" size="sm" onClick={()=>void download(String(doc.slug))}><ArrowDownToLine size={14}/>Download</Button></div>)}</div>}</div></div></Modal>
 }
 
 const resourceConfig: Record<string, { title: string; endpoint: string; fields: Field[]; columns: string[] }> = {
@@ -89,7 +124,7 @@ const resourceConfig: Record<string, { title: string; endpoint: string; fields: 
     { name: 'name', label: 'Full name', required: true }, { name: 'phone', label: 'Phone number', required: true, type: 'tel' }, { name: 'email', label: 'Email', type: 'email' }, { name: 'address', label: 'Address' }, { name: 'userId', label: 'Login account ID', hint: 'Create an account with cmd/create-user first' },
   ] },
   members: { title: 'Members', endpoint: '/members?limit=200', columns: ['memberNumber', 'name', 'phone', 'promoterId', 'kycType', 'active'], fields: [
-    { name: 'promoterId', label: 'Assigned promoter', required: true }, { name: 'name', label: 'Full name', required: true }, { name: 'phone', label: 'Phone number', required: true, type: 'tel' }, { name: 'email', label: 'Email', type: 'email' }, { name: 'address', label: 'Address' }, { name: 'kycType', label: 'KYC document type', options: [{ value: 'aadhaar', label: 'Aadhaar' }, { value: 'pan', label: 'PAN' }, { value: 'voter_id', label: 'Voter ID' }] }, { name: 'kycLast4', label: 'Last four digits only', hint: 'Never enter a full document number' }, { name: 'userId', label: 'Login account ID', hint: 'Optional. Create the member account first.' },
+    { name: 'promoterId', label: 'Assigned promoter', required: true }, { name: 'name', label: 'Full name', required: true }, { name: 'phone', label: 'Phone number', required: true, type: 'tel' }, { name: 'email', label: 'Email', type: 'email' }, { name: 'address', label: 'Address' }, { name: 'kycType', label: 'KYC document type', options: [{ value: 'aadhaar', label: 'Aadhaar' }, { value: 'pan', label: 'PAN' }, { value: 'voter_id', label: 'Voter ID' }] }, { name: 'kycLast4', label: 'Last four digits only', hint: 'Never enter a full document number' }, { name: 'userId', label: 'Login account ID', hint: 'Optional. Create the member account first.' }, { name: 'kycTitle', label: 'Uploaded KYC file title' }, { name: 'kycFile', label: 'KYC file (PDF or image)', type: 'file' },
   ] },
   schemes: { title: 'Schemes', endpoint: '/schemes?limit=200', columns: ['name', 'contributionMinor', 'durationMonths', 'currency', 'active'], fields: [
     { name: 'name', label: 'Scheme name', required: true }, { name: 'description', label: 'Description' }, { name: 'contributionMinor', label: 'Monthly contribution (paise)', required: true, type: 'number' }, { name: 'durationMonths', label: 'Duration (months)', required: true, type: 'number' }, { name: 'currency', label: 'Currency', hint: 'INR' },
@@ -100,6 +135,7 @@ export function ResourcePage({ kind }: { kind: keyof typeof resourceConfig }) {
   const config = resourceConfig[kind]
   const [rows, setRows] = useState<Row[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [form, setForm] = useState<Row | null>(null); const [saving, setSaving] = useState(false); const [query, setQuery] = useState('')
   const [promoters, setPromoters] = useState<Row[]>([])
+  const [kycMember, setKycMember] = useState<Row | null>(null)
   const canCreate = hasPermission(`${kind}.create`)
   const canUpdate = hasPermission(`${kind}.update`)
   const canDelete = hasPermission(`${kind}.delete`)
@@ -109,18 +145,18 @@ export function ResourcePage({ kind }: { kind: keyof typeof resourceConfig }) {
   const fields = kind === 'members' ? config.fields.map(field => field.name === 'promoterId' ? { ...field, options: promoters.map(p => ({ value: String(p.id), label: String(p.name) })) } : field) : config.fields
   const visible = useMemo(() => rows.filter(row => JSON.stringify(row).toLowerCase().includes(query.toLowerCase())), [rows, query])
   async function submit(values: Row) {
-    setSaving(true); setError(''); values.active = form?.id ? Boolean(form.active) : true
+    setSaving(true); setError(''); const kycFile=values.kycFile instanceof File&&values.kycFile.size>0?values.kycFile:null;const kycTitle=String(values.kycTitle||'KYC document');delete values.kycFile;delete values.kycTitle;values.active = form?.id ? Boolean(form.active) : true
     const pending = form?.id
       ? optimisticUpdate(setRows, rows, String(form.id), values, () => api<Row>(`/${kind}/${form.id}`, { method: 'PUT', body: JSON.stringify(values) }))
       : optimisticCreate(setRows, values, () => api<Row>(`/${kind}`, { method: 'POST', body: JSON.stringify(values) }))
-    setForm(null)
-    try { await pending } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the record') }
+    try { const saved=await pending;if(kind==='members'&&kycFile){setForm(saved);await uploadKYCDocument(String(saved.id),kycFile,kycTitle)}setForm(null) } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the record');throw err }
     finally { setSaving(false) }
   }
   async function deactivate(row: Row) { if (!window.confirm(`Deactivate ${String(row.name || 'this record')}?`)) return; setError(''); try { await optimisticRemove(setRows, rows, String(row.id), () => api(`/${kind}/${row.id}`, { method: 'DELETE' })) } catch (err) { setError(err instanceof Error ? err.message : 'Could not deactivate record') } }
   return <div className="page-enter"><PageHeading eyebrow="Administration · Master data" title={config.title} description={`Manage ${config.title.toLowerCase()} and keep scheme records organized.`} action={canCreate&&<Button onClick={() => setForm({})}><Plus size={16} />Add {kind === 'schemes' ? 'scheme' : kind === 'members' ? 'member' : 'promoter'}</Button>} />
-    <Card><div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"><div className="relative w-full sm:max-w-xs"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} /><Input aria-label="Search records" className="pl-9" placeholder={`Search ${config.title.toLowerCase()}`} value={query} onChange={e => setQuery(e.target.value)} /></div><span className="text-xs text-slate-400">{visible.length} records</span></div><Notice error={error} onRetry={() => void load()} />{loading ? <Loading /> : <DataTable rows={visible} columns={config.columns} actions={canUpdate||canDelete ? row => <div className="flex justify-end gap-1">{canUpdate&&<Button variant="ghost" size="sm" onClick={() => setForm(row)}>Edit</Button>}{canDelete&&<Button variant="ghost" size="sm" className="text-rose-600" onClick={() => void deactivate(row)}>Deactivate</Button>}</div> : undefined} />}</Card>
+    <Card><div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"><div className="relative w-full sm:max-w-xs"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} /><Input aria-label="Search records" className="pl-9" placeholder={`Search ${config.title.toLowerCase()}`} value={query} onChange={e => setQuery(e.target.value)} /></div><span className="text-xs text-slate-400">{visible.length} records</span></div><Notice error={error} onRetry={() => void load()} />{loading ? <Loading /> : <DataTable rows={visible} columns={config.columns} actions={canUpdate||canDelete||kind==='members' ? row => <div className="flex justify-end gap-1">{kind==='members'&&<Button variant="ghost" size="sm" onClick={()=>setKycMember(row)}>KYC files</Button>}{canUpdate&&<Button variant="ghost" size="sm" onClick={() => setForm(row)}>Edit</Button>}{canDelete&&<Button variant="ghost" size="sm" className="text-rose-600" onClick={() => void deactivate(row)}>Deactivate</Button>}</div> : undefined} />}</Card>
     {form && <ModalForm title={form.id ? `Edit ${kind.slice(0, -1)}` : `Add ${kind.slice(0, -1)}`} fields={fields} initial={form} onClose={() => setForm(null)} onSubmit={submit} busy={saving} />}
+    {kycMember&&<KycDocumentsModal member={kycMember} onClose={()=>setKycMember(null)}/>}
   </div>
 }
 
@@ -208,10 +244,11 @@ export function PaymentPage({ role }: { role: string }) {
 
 export function PromoterCustomersPage() {
   const {data,error,loading,refresh,setData}=useLoad<Row[]>('/members/mine')
-  const [open,setOpen]=useState(false);const [saving,setSaving]=useState(false);const [formError,setFormError]=useState('')
+  const [open,setOpen]=useState(false);const [saving,setSaving]=useState(false);const [formError,setFormError]=useState('');const [kycMember,setKycMember]=useState<Row|null>(null)
   async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();setSaving(true);setFormError('');const form=new FormData(event.currentTarget);const payload={name:String(form.get('name')),phone:String(form.get('phone')),email:String(form.get('email')||''),address:String(form.get('address')||''),username:String(form.get('username')),password:String(form.get('password'))};try{const created=await api<Row>('/members/mine',{method:'POST',body:JSON.stringify(payload)});setData(rows=>[created,...(rows||[])]);setOpen(false)}catch(err){setFormError(err instanceof Error?err.message:'Could not create customer')}finally{setSaving(false)}}
-  return <div className="page-enter"><PageHeading eyebrow="Your customers" title="Customer directory" description="Create customer access and manage customers assigned to your promoter account." action={<Button onClick={()=>{setFormError('');setOpen(true)}}><Plus size={15}/>Add customer</Button>}/><Card><CardHeader><div><CardTitle>My customers</CardTitle><p className="mt-1 text-xs text-slate-400">Only customers assigned to your account are listed.</p></div><Button variant="outline" size="sm" onClick={()=>void refresh()}><RefreshCw size={14}/>Refresh</Button></CardHeader><Notice error={error}/>{loading?<Loading/>:<DataTable rows={data||[]} columns={['memberNumber','name','phone','email','active']} empty="No customers yet. Add a customer to get started."/>}</Card>
+  return <div className="page-enter"><PageHeading eyebrow="Your customers" title="Customer directory" description="Create customer access and manage customers assigned to your promoter account." action={<Button onClick={()=>{setFormError('');setOpen(true)}}><Plus size={15}/>Add customer</Button>}/><Card><CardHeader><div><CardTitle>My customers</CardTitle><p className="mt-1 text-xs text-slate-400">Only customers assigned to your account are listed.</p></div><Button variant="outline" size="sm" onClick={()=>void refresh()}><RefreshCw size={14}/>Refresh</Button></CardHeader><Notice error={error}/>{loading?<Loading/>:<DataTable rows={data||[]} columns={['memberNumber','name','phone','email','active']} actions={row=><Button variant="ghost" size="sm" onClick={()=>setKycMember(row)}>KYC files</Button>} empty="No customers yet. Add a customer to get started."/>}</Card>
     {open&&<Modal ariaLabel="Add customer" onClose={()=>setOpen(false)} className="sm:max-w-xl"><div className="border-b border-slate-100 px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-indigo-600">Customer access</p><h2 className="mt-1 text-xl font-bold">Add a customer</h2><p className="mt-1 text-xs text-slate-500">Share the username and initial password securely with the customer.</p></div><form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5"><Notice error={formError}/><label className="block text-xs font-semibold text-slate-600">Full name<Input name="name" required minLength={2} maxLength={120} className="mt-1.5"/></label><label className="block text-xs font-semibold text-slate-600">Phone<Input name="phone" type="tel" required minLength={5} maxLength={32} className="mt-1.5"/></label><label className="block text-xs font-semibold text-slate-600">Email (optional)<Input name="email" type="email" className="mt-1.5"/></label><label className="block text-xs font-semibold text-slate-600">Address<Input name="address" className="mt-1.5"/></label><label className="block text-xs font-semibold text-slate-600">Login username<Input name="username" required minLength={3} maxLength={80} autoComplete="off" className="mt-1.5"/></label><label className="block text-xs font-semibold text-slate-600">Initial password<Input name="password" type="password" required minLength={12} autoComplete="new-password" className="mt-1.5"/><span className="mt-1 block text-[11px] font-normal text-slate-400">At least 12 characters. The customer can sign in immediately.</span></label></div><div className="flex justify-end gap-2 border-t border-slate-100 px-6 py-4"><Button type="button" variant="outline" onClick={()=>setOpen(false)}>Cancel</Button><Button disabled={saving}>{saving?'Creating…':'Create customer'}</Button></div></form></Modal>}
+    {kycMember&&<KycDocumentsModal member={kycMember} onClose={()=>setKycMember(null)}/>}
   </div>
 }
 

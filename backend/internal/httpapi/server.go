@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"schemeapp/backend/internal/application"
@@ -19,10 +24,12 @@ import (
 )
 
 type API struct {
-	service *application.Service
-	tokens  *security.TokenIssuer
-	logger  *slog.Logger
-	config  config.Config
+	service     *application.Service
+	tokens      *security.TokenIssuer
+	logger      *slog.Logger
+	config      config.Config
+	s3Client    *s3.Client
+	s3Presigner *s3.PresignClient
 }
 
 func serviceError(err error) error {
@@ -38,6 +45,22 @@ func serviceError(err error) error {
 
 func New(cfg config.Config, logger *slog.Logger, service *application.Service, tokens *security.TokenIssuer) *echo.Echo {
 	a := &API{service: service, tokens: tokens, logger: logger, config: cfg}
+	if cfg.S3Bucket != "" && cfg.S3Region != "" {
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(cfg.S3Region))
+		if err == nil {
+			opts := []func(*s3.Options){}
+			if cfg.S3Endpoint != "" {
+				opts = append(opts, func(o *s3.Options) { o.BaseEndpoint = aws.String(cfg.S3Endpoint) })
+			}
+			if cfg.S3UsePathStyle {
+				opts = append(opts, func(o *s3.Options) { o.UsePathStyle = true })
+			}
+			a.s3Client = s3.NewFromConfig(awsCfg, opts...)
+			a.s3Presigner = s3.NewPresignClient(a.s3Client)
+		} else {
+			logger.Error("could not configure S3 client", "error", err)
+		}
+	}
 	e := echo.New()
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
@@ -106,6 +129,11 @@ func New(cfg config.Config, logger *slog.Logger, service *application.Service, t
 	staff.GET("/members/mine", a.myMembers, a.requirePermissionOrRole("members.read", "promoter"))
 	staff.POST("/members/mine", a.createMyCustomer, a.requirePermissionOrRole("members.create", "promoter"))
 	staff.POST("/promoter/enrollments", a.createEnrollment, a.requirePermissionOrRole("enrollments.create", "promoter"))
+	staff.POST("/members/:memberId/kyc-uploads", a.beginKYCUpload, a.requireAnyPermission("members.create", "members.update"))
+	staff.POST("/members/:memberId/kyc-uploads/:slug/parts/url", a.kycPartURL, a.requireAnyPermission("members.create", "members.update"))
+	staff.POST("/members/:memberId/kyc-uploads/:slug/complete", a.completeKYCUpload, a.requireAnyPermission("members.create", "members.update"))
+	staff.GET("/members/:memberId/kyc-documents", a.listKYCDocuments, a.requirePermissionOrRole("members.read", "promoter"))
+	staff.GET("/members/:memberId/kyc-documents/:slug/download", a.downloadKYCDocument, a.requirePermissionOrRole("members.read", "promoter"))
 	staff.GET("/promoter/incentives/mine", a.myIncentives, a.requirePermissionOrRole("incentives.read", "promoter"))
 	member := e.Group("/api/v1", a.authenticate("member"))
 	member.GET("/member/me", a.myMember, a.requirePermission("dashboard.read"))
@@ -145,7 +173,9 @@ func (a *API) authenticate(roles ...string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			claims, err := a.requestClaims(c)
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			if !allowed[claims.Role] {
 				return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 			}
@@ -155,11 +185,17 @@ func (a *API) authenticate(roles ...string) echo.MiddlewareFunc {
 }
 
 func (a *API) requestClaims(c *echo.Context) (*security.AccessClaims, error) {
-	if claims, ok := c.Get("claims").(*security.AccessClaims); ok && claims != nil { return claims, nil }
+	if claims, ok := c.Get("claims").(*security.AccessClaims); ok && claims != nil {
+		return claims, nil
+	}
 	h := strings.TrimSpace(c.Request().Header.Get(echo.HeaderAuthorization))
-	if !strings.HasPrefix(h, "Bearer ") { return nil, echo.NewHTTPError(http.StatusUnauthorized, "authentication required") }
+	if !strings.HasPrefix(h, "Bearer ") {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "authentication required")
+	}
 	claims, err := a.tokens.Verify(strings.TrimSpace(strings.TrimPrefix(h, "Bearer ")))
-	if err != nil { return nil, echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired access token") }
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired access token")
+	}
 	c.Set("claims", claims)
 	return claims, nil
 }
@@ -172,10 +208,14 @@ func (a *API) requireAnyPermission(permissions ...string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			claims, err := a.requestClaims(c)
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			for _, permission := range permissions {
 				allowed, err := a.service.Can(c.Request().Context(), claims.Subject, permission)
-				if err == nil && allowed { return next(c) }
+				if err == nil && allowed {
+					return next(c)
+				}
 			}
 			return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 		}
@@ -187,22 +227,33 @@ func (a *API) requireReportPermission() echo.MiddlewareFunc {
 		return func(c *echo.Context) error {
 			if c.Param("kind") == "cashbook" {
 				claims, err := a.requestClaims(c)
-				if err != nil { return err }
+				if err != nil {
+					return err
+				}
 				for _, permission := range []string{"cash_receipts.read", "supplier_payments.read"} {
 					allowed, checkErr := a.service.Can(c.Request().Context(), claims.Subject, permission)
-					if checkErr != nil || !allowed { return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions") }
+					if checkErr != nil || !allowed {
+						return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+					}
 				}
 				return next(c)
 			}
 			permissions := []string{"reports.read"}
 			switch c.Param("kind") {
-			case "payments", "daybook": permissions = append(permissions, "payments.read")
-			case "dues": permissions = append(permissions, "enrollments.read")
-			case "incentives": permissions = append(permissions, "incentives.read")
-			case "draw-results": permissions = append(permissions, "draws.read")
-			case "customer-receipts": permissions = append(permissions, "cash_receipts.read")
-			case "supplier-payments": permissions = append(permissions, "supplier_payments.read")
-			case "party-ledger": permissions = append(permissions, "parties.read")
+			case "payments", "daybook":
+				permissions = append(permissions, "payments.read")
+			case "dues":
+				permissions = append(permissions, "enrollments.read")
+			case "incentives":
+				permissions = append(permissions, "incentives.read")
+			case "draw-results":
+				permissions = append(permissions, "draws.read")
+			case "customer-receipts":
+				permissions = append(permissions, "cash_receipts.read")
+			case "supplier-payments":
+				permissions = append(permissions, "supplier_payments.read")
+			case "party-ledger":
+				permissions = append(permissions, "parties.read")
 			}
 			return a.requireAnyPermission(permissions...)(next)(c)
 		}
@@ -211,14 +262,22 @@ func (a *API) requireReportPermission() echo.MiddlewareFunc {
 
 func (a *API) requirePermissionOrRole(permission string, allowedRoles ...string) echo.MiddlewareFunc {
 	roleSet := map[string]bool{}
-	for _, role := range allowedRoles { roleSet[role] = true }
+	for _, role := range allowedRoles {
+		roleSet[role] = true
+	}
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			claims, err := a.requestClaims(c)
-			if err != nil { return err }
-			if roleSet[claims.Role] { return next(c) }
+			if err != nil {
+				return err
+			}
+			if roleSet[claims.Role] {
+				return next(c)
+			}
 			allowed, err := a.service.Can(c.Request().Context(), claims.Subject, permission)
-			if err != nil || !allowed { return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions") }
+			if err != nil || !allowed {
+				return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+			}
 			return next(c)
 		}
 	}
@@ -226,9 +285,13 @@ func (a *API) requirePermissionOrRole(permission string, allowedRoles ...string)
 
 func (a *API) currentAccess(c *echo.Context) error {
 	claims, err := a.requestClaims(c)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	access, err := a.service.UserAccess(c.Request().Context(), claims.Subject)
-	if err != nil { return echo.NewHTTPError(http.StatusUnauthorized, "account is inactive") }
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "account is inactive")
+	}
 	return c.JSON(http.StatusOK, access)
 }
 
@@ -251,7 +314,9 @@ func (a *API) login(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password")
 	}
 	access, err := a.service.UserAccess(c.Request().Context(), id)
-	if err != nil { return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password") }
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password")
+	}
 	minutes := 15
 	if _, err := fmt.Sscan(a.config.JWTLifetimeMinutes, &minutes); err != nil || minutes < 1 || minutes > 1440 {
 		minutes = 15
@@ -410,23 +475,33 @@ func (a *API) createEnrollment(c *echo.Context) error {
 }
 func (a *API) createMyCustomer(c *echo.Context) error {
 	var req struct {
-		Name string `json:"name"`
-		Phone string `json:"phone"`
-		Email string `json:"email"`
-		Address string `json:"address"`
+		Name     string `json:"name"`
+		Phone    string `json:"phone"`
+		Email    string `json:"email"`
+		Address  string `json:"address"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := c.Bind(&req); err != nil { return echo.NewHTTPError(http.StatusBadRequest, "invalid customer") }
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid customer")
+	}
 	out, err := a.service.CreateMyCustomer(c.Request().Context(), a.actor(c), req.Name, req.Phone, req.Email, req.Address, req.Username, req.Password)
-	if err != nil { return serviceError(err) }
+	if err != nil {
+		return serviceError(err)
+	}
 	return c.JSONBlob(http.StatusCreated, out)
 }
 func (a *API) setMyPaymentFrequency(c *echo.Context) error {
-	var req struct { Frequency string `json:"frequency"` }
-	if err := c.Bind(&req); err != nil { return echo.NewHTTPError(http.StatusBadRequest, "invalid payment frequency") }
+	var req struct {
+		Frequency string `json:"frequency"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid payment frequency")
+	}
 	out, err := a.service.SetMyPaymentFrequency(c.Request().Context(), a.actor(c), c.Param("id"), req.Frequency)
-	if err != nil { return serviceError(err) }
+	if err != nil {
+		return serviceError(err)
+	}
 	return c.JSONBlob(http.StatusOK, out)
 }
 func (a *API) updateEnrollmentStatus(c *echo.Context) error {
@@ -621,12 +696,20 @@ func (a *API) financialReceipt(c *echo.Context) error {
 	if err != nil {
 		return serviceError(err)
 	}
-	var entry struct { Direction string `json:"direction"` }
-	if err := json.Unmarshal(out, &entry); err != nil { return err }
+	var entry struct {
+		Direction string `json:"direction"`
+	}
+	if err := json.Unmarshal(out, &entry); err != nil {
+		return err
+	}
 	permission := "cash_receipts.read"
-	if entry.Direction == "payment" { permission = "supplier_payments.read" }
+	if entry.Direction == "payment" {
+		permission = "supplier_payments.read"
+	}
 	actor := a.actor(c)
 	allowed, err := a.service.Can(c.Request().Context(), actor.UserID, permission)
-	if err != nil || !allowed { return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions") }
+	if err != nil || !allowed {
+		return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	}
 	return c.JSONBlob(http.StatusOK, out)
 }
