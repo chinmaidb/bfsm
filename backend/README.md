@@ -223,6 +223,13 @@ duplicate receipts when a client retries. KYC stores the document type and last 
 not send complete government ID numbers to this API. Reports cap output at 5,000
 rows.
 
+KYC objects are written under the `S3_KEY_PREFIX` object-key prefix (defaults
+to `bfsm`), followed by `kyc/<member-id>/<random-slug>`. For example, the
+default key is `bfsm/kyc/<member-id>/<random-slug>`. The prefix is a logical
+folder within the configured bucket; no bucket folder needs to be created.
+Each object's full key is saved in the database and used for presigned
+downloads, so existing uploads under an earlier key layout remain accessible.
+
 ## Authorization and security
 
 Use Argon2id for account password hashes; passwords are never stored in

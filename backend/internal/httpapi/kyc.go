@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -95,7 +96,7 @@ func (a *API) beginKYCUpload(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
-	key := "kyc/" + memberID + "/" + slug
+	key := path.Join(a.config.S3KeyPrefix, "kyc", memberID, slug)
 	out, err := client.CreateMultipartUpload(c.Request().Context(), &s3.CreateMultipartUploadInput{Bucket: aws.String(a.config.S3Bucket), Key: aws.String(key), ContentType: aws.String(req.ContentType), ServerSideEncryption: types.ServerSideEncryptionAes256})
 	if err != nil {
 		return err

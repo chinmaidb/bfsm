@@ -19,6 +19,7 @@ type Config struct {
 	SuperAdminPassword string
 	S3Region           string
 	S3Bucket           string
+	S3KeyPrefix        string
 	S3Endpoint         string
 	S3UsePathStyle     bool
 }
@@ -37,6 +38,7 @@ func Load() (Config, error) {
 		SuperAdminPassword: os.Getenv("SUPER_ADMIN_PASSWORD"),
 		S3Region:           env("S3_REGION", ""),
 		S3Bucket:           env("S3_BUCKET", ""),
+		S3KeyPrefix:        strings.Trim(env("S3_KEY_PREFIX", "bfsm"), "/"),
 		S3Endpoint:         env("S3_ENDPOINT", ""),
 		S3UsePathStyle:     strings.EqualFold(env("S3_USE_PATH_STYLE", "false"), "true"),
 	}
